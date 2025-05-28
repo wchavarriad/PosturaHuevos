@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import altair as alt
 
 # --- Base de datos de usuarios ---
 USUARIOS = {
@@ -12,14 +13,15 @@ USUARIOS = {
 def validar_usuario(usuario, contraseña):
     return usuario in USUARIOS and USUARIOS[usuario]["password"] == contraseña
 
-# --- Cargar CSV y convertir Fecha ---
+# --- Cargar CSV y convertir columnas ---
 @st.cache_data(ttl=0)
 def cargar_datos():
     try:
         df = pd.read_csv("FuentesDatos/control_produccion_huevos_actualizado.csv")
         df["Fecha"] = pd.to_datetime(df["Fecha"], errors="coerce")
-        df = df.sort_values("Fecha").reset_index(drop=True)
-        return df
+        df["Total (Manuscrito)"] = df["Total (Manuscrito)"].astype(str).str.replace(",", "").astype(float)
+        df["% Quebrado"] = df["% Quebrado"].astype(str).str.replace("%", "").astype(float)
+        return df.sort_values("Fecha").reset_index(drop=True)
     except FileNotFoundError:
         st.error("❌ No se encontró el archivo CSV.")
         return pd.DataFrame()
@@ -53,22 +55,28 @@ else:
     st.sidebar.title("Menú")
     st.sidebar.success(f"Sesión: {st.session_state.usuario} ({st.session_state.rol})")
 
-    opcion = st.sidebar.radio("Opciones", ["Panel Principal", "📋 Ver Tabla de Producción", "Crear Funciones", "Cerrar Sesión"])
+    rol = st.session_state.rol
+    if rol == "Administrador":
+        menu = ["Panel Principal", "🗃️ Admin de Datos", "📊 Visualización de Datos", "Crear Funciones", "🌍 Info Nacional", "Cerrar Sesión"]
+    elif rol == "Usuario":
+        menu = ["Panel Principal", "📊 Visualización de Datos", "🌍 Info Nacional", "Cerrar Sesión"]
+    else:
+        menu = ["Panel Principal", "🌍 Info Nacional", "Cerrar Sesión"]
 
+    opcion = st.sidebar.radio("Opciones", menu)
+
+    # Panel Principal
     if opcion == "Panel Principal":
         st.title("🛠️ Panel Principal")
-        if st.session_state.rol == "Administrador":
-            st.info("Tienes acceso completo a todas las funciones.")
-        else:
-            st.info("Tienes acceso limitado al sistema.")
+        st.info(f"Rol actual: {rol}")
 
-    elif opcion == "📋 Ver Tabla de Producción":
-        st.title("📊 Tabla de Producción de Huevos")
-        df = cargar_datos()
-
-        if df.empty:
-            st.warning("No hay datos para mostrar.")
+    # Admin de Datos (solo Admin)
+    elif opcion == "🗃️ Admin de Datos":
+        if rol != "Administrador":
+            st.warning("⚠️ Acceso restringido a administradores.")
         else:
+            st.title("🗃️ Administración de Datos de Producción")
+            df = cargar_datos()
             st.dataframe(df, use_container_width=True)
 
             st.markdown("---")
@@ -85,90 +93,156 @@ else:
                 if st.button("🗑️ Eliminar fila"):
                     st.session_state.accion = "eliminar"
 
-            # AGREGAR
+            # Agregar
             if st.session_state.accion == "agregar":
                 with st.expander("➕ Agregar nuevo registro", expanded=True):
                     nueva_fecha = pd.to_datetime(st.date_input("Fecha"))
-                    columnas = ['#1', '#2', '#3', 'Quebrados', 'Pollitas']
-                    nuevo = {col: st.number_input(f"{col}:", value=0, key=f"nuevo_{col}") for col in columnas}
-                    total_manu = st.text_input("Total (Manuscrito):", key="nuevo_total_manu")
+                    campos = ['#1', '#2', '#3', 'Quebrados', 'Pollitas']
+                    datos = {c: st.number_input(f"{c}:", value=0, key=f"nuevo_{c}") for c in campos}
+                    total_manu = st.number_input("Total (Manuscrito):", value=0, key="nuevo_total_manu")
 
                     if st.button("Guardar nueva fila"):
                         if nueva_fecha in df["Fecha"].values:
                             st.error("Ya existe un registro con esa fecha.")
                         else:
-                            nuevo_df = pd.DataFrame([{
+                            nuevo = pd.DataFrame([{
                                 "Fecha": nueva_fecha,
-                                **nuevo,
-                                "Total (Manuscrito)": total_manu
+                                **datos,
+                                "Total (Manuscrito)": total_manu,
                             }])
-                            nuevo_df["Total Calculado (#1+#2+#3+Pollitas)"] = (
-                                nuevo_df['#1'] + nuevo_df['#2'] + nuevo_df['#3'] + nuevo_df['Pollitas']
+                            nuevo["Total Calculado (#1+#2+#3+Pollitas)"] = (
+                                nuevo['#1'] + nuevo['#2'] + nuevo['#3'] + nuevo['Pollitas']
                             )
-                            nuevo_df["% Quebrado"] = (
-                                (nuevo_df["Quebrados"] / nuevo_df["Total Calculado (#1+#2+#3+Pollitas)"]) * 100
-                            ).round(2).astype(str) + '%'
-
-                            df = pd.concat([df, nuevo_df], ignore_index=True)
-                            df["Fecha"] = pd.to_datetime(df["Fecha"], errors="coerce")
-                            df = df.sort_values("Fecha")
-                            df["Fecha"] = df["Fecha"].dt.strftime("%Y-%m-%d")
+                            nuevo["% Quebrado"] = ((nuevo["Quebrados"] / nuevo["Total Calculado (#1+#2+#3+Pollitas)"]) * 100).round(2)
+                            df = pd.concat([df, nuevo], ignore_index=True).sort_values("Fecha")
                             df.to_csv("FuentesDatos/control_produccion_huevos_actualizado.csv", index=False)
-
-                            st.success("✅ Fila agregada correctamente.")
-                            st.cache_data.clear()  # <- BORRAR CACHÉ
+                            st.success("✅ Fila agregada.")
+                            st.cache_data.clear()
                             st.session_state.accion = None
                             st.rerun()
 
-            # EDITAR
+            # Editar
             elif st.session_state.accion == "editar":
                 with st.expander("✏️ Editar registro existente", expanded=True):
-                    fechas_opciones = df["Fecha"].dt.strftime("%Y-%m-%d")
-                    fecha_editar_str = st.selectbox("Selecciona la fecha", fechas_opciones)
-                    fila = df[df["Fecha"].dt.strftime("%Y-%m-%d") == fecha_editar_str].iloc[0]
-                    columnas = ['#1', '#2', '#3', 'Quebrados', 'Pollitas']
-                    nuevos = {col: st.number_input(f"{col}:", value=int(fila[col]), key=f"editar_{col}") for col in columnas}
-                    total_manu = st.text_input("Total (Manuscrito):", value=str(fila["Total (Manuscrito)"]), key="editar_total_manu")
+                    fechas = df["Fecha"].dt.strftime("%Y-%m-%d")
+                    fecha_sel = st.selectbox("Selecciona fecha", fechas)
+                    fila = df[df["Fecha"].dt.strftime("%Y-%m-%d") == fecha_sel].iloc[0]
+                    campos = ['#1', '#2', '#3', 'Quebrados', 'Pollitas']
+                    nuevos = {c: st.number_input(f"{c}:", value=int(fila[c]), key=f"editar_{c}") for c in campos}
+                    total_manu = st.number_input("Total (Manuscrito):", value=int(fila["Total (Manuscrito)"]))
 
                     if st.button("Guardar cambios"):
-                        idx = df[df["Fecha"].dt.strftime("%Y-%m-%d") == fecha_editar_str].index[0]
-                        for col in columnas:
-                            df.at[idx, col] = nuevos[col]
+                        idx = df[df["Fecha"].dt.strftime("%Y-%m-%d") == fecha_sel].index[0]
+                        for c in campos:
+                            df.at[idx, c] = nuevos[c]
                         df.at[idx, "Total (Manuscrito)"] = total_manu
                         df["Total Calculado (#1+#2+#3+Pollitas)"] = df["#1"] + df["#2"] + df["#3"] + df["Pollitas"]
-                        df["% Quebrado"] = ((df["Quebrados"] / df["Total Calculado (#1+#2+#3+Pollitas)"]) * 100).round(2).astype(str) + '%'
-
-                        df["Fecha"] = pd.to_datetime(df["Fecha"], errors="coerce")
-                        df = df.sort_values("Fecha")
-                        df["Fecha"] = df["Fecha"].dt.strftime("%Y-%m-%d")
+                        df["% Quebrado"] = (df["Quebrados"] / df["Total Calculado (#1+#2+#3+Pollitas)"] * 100).round(2)
                         df.to_csv("FuentesDatos/control_produccion_huevos_actualizado.csv", index=False)
-
                         st.success("✅ Registro actualizado.")
                         st.cache_data.clear()
                         st.session_state.accion = None
                         st.rerun()
 
-            # ELIMINAR
+            # Eliminar
             elif st.session_state.accion == "eliminar":
                 with st.expander("🗑️ Eliminar registro", expanded=True):
-                    fechas_opciones = df["Fecha"].dt.strftime("%Y-%m-%d")
-                    fecha_eliminar_str = st.selectbox("Fecha a eliminar", fechas_opciones)
+                    fechas = df["Fecha"].dt.strftime("%Y-%m-%d")
+                    fecha_sel = st.selectbox("Fecha a eliminar", fechas)
                     if st.button("Eliminar"):
-                        df = df[df["Fecha"].dt.strftime("%Y-%m-%d") != fecha_eliminar_str]
-                        df["Fecha"] = pd.to_datetime(df["Fecha"], errors="coerce")
-                        df = df.sort_values("Fecha")
-                        df["Fecha"] = df["Fecha"].dt.strftime("%Y-%m-%d")
+                        df = df[df["Fecha"].dt.strftime("%Y-%m-%d") != fecha_sel]
                         df.to_csv("FuentesDatos/control_produccion_huevos_actualizado.csv", index=False)
-
-                        st.success(f"✅ Registro del {fecha_eliminar_str} eliminado.")
+                        st.success(f"✅ Registro del {fecha_sel} eliminado.")
                         st.cache_data.clear()
                         st.session_state.accion = None
                         st.rerun()
 
+    # Visualización de datos
+    elif opcion == "📊 Visualización de Datos":
+        if rol not in ["Administrador", "Usuario"]:
+            st.warning("⚠️ Esta vista es solo para usuarios autenticados.")
+        else:
+            st.title("📊 Producción de Huevos - Visualización")
+            df = cargar_datos()
+
+            if df.empty:
+                st.warning("No hay datos disponibles.")
+            else:
+                st.dataframe(df, use_container_width=True)
+                if st.button("🔄 Actualizar datos"):
+                    st.cache_data.clear()
+                    st.rerun()
+
+                df["Día"] = df["Fecha"].dt.day
+                df["Mes"] = df["Fecha"].dt.month_name()
+                df["DíaSemana"] = df["Fecha"].dt.day_name()
+
+                # Línea: Total Calculado vs Manuscrito
+                st.markdown("### 📈 Total Calculado vs Manuscrito")
+                c1 = alt.Chart(df).mark_line(point=True, color='blue').encode(
+                    x='Fecha:T', y='Total Calculado (#1+#2+#3+Pollitas):Q'
+                )
+                c2 = alt.Chart(df).mark_line(strokeDash=[5,5], color='red').encode(
+                    x='Fecha:T', y='Total (Manuscrito):Q'
+                )
+                st.altair_chart(c1 + c2, use_container_width=True)
+
+                # Línea: % Quebrado
+                st.markdown("### 📉 % de Huevos Quebrados")
+                st.altair_chart(alt.Chart(df).mark_line().encode(
+                    x='Fecha:T', y='% Quebrado:Q'
+                ), use_container_width=True)
+
+                # Línea: por galpón
+                st.markdown("### 🐔 Producción por Galpón")
+                long = df.melt(id_vars='Fecha', value_vars=['#1', '#2', '#3', 'Pollitas'],
+                               var_name='Galpón', value_name='Producción')
+                st.altair_chart(alt.Chart(long).mark_line().encode(
+                    x='Fecha:T', y='Producción:Q', color='Galpón:N'
+                ), use_container_width=True)
+
+                # Dispersión: Producción vs Quebrados
+                st.markdown("### 🧮 Relación Producción vs Quebrados")
+                st.altair_chart(alt.Chart(df).mark_circle(size=60).encode(
+                    x='Total Calculado (#1+#2+#3+Pollitas):Q', y='Quebrados:Q'
+                ).interactive(), use_container_width=True)
+
+                # Mapa calor
+                st.markdown("### 🔥 Mapa de Calor por Día")
+                st.altair_chart(alt.Chart(df).mark_rect().encode(
+                    x='Día:O', y='Mes:N', color='Total Calculado (#1+#2+#3+Pollitas):Q'
+                ), use_container_width=True)
+
+                # Pie: total por galpón
+                st.markdown("### 📊 Total por Galpón")
+                galp = df[['#1', '#2', '#3', 'Pollitas']].sum().reset_index()
+                galp.columns = ['Galpón', 'Producción']
+                st.altair_chart(alt.Chart(galp).mark_arc().encode(
+                    theta='Producción:Q', color='Galpón:N'
+                ), use_container_width=True)
+
+                # Barras: por día de semana
+                st.markdown("### 📅 Producción por Día de la Semana")
+                st.altair_chart(alt.Chart(df).mark_bar().encode(
+                    x=alt.X('DíaSemana:N', sort=['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']),
+                    y='sum(Total Calculado (#1+#2+#3+Pollitas)):Q'
+                ), use_container_width=True)
+
+    # Info Nacional
+    elif opcion == "🌍 Info Nacional":
+        st.title("🇨🇷 Producción de Huevos en Costa Rica")
+        st.markdown("""
+        - 🐔 En Costa Rica se producen más de **1.6 mil millones de huevos** al año.
+        - 🍳 El consumo per cápita es de aproximadamente **230 huevos por persona**.
+        - 📍 Zonas clave: **Alajuela, San Carlos, Cartago**.
+        - 🌱 La avicultura es vital para la seguridad alimentaria nacional.
+        - 📊 Fuente: [MAG](https://www.mag.go.cr) | [INEC](https://www.inec.cr)
+        """)
+        st.image("https://www.mag.go.cr/sites/default/files/styles/large/public/media/image/produccion-huevos-cr.jpg", use_column_width=True)
+
+    # Crear funciones
     elif opcion == "Crear Funciones":
         st.title("🧪 Ejecutar Función Personalizada")
-        st.markdown("Escribe una función en Python y ejecútala:")
-        st.code("def mi_funcion():\n    return 2 + 2")
         codigo = st.text_area("Código de la función:", height=200)
         if st.button("Ejecutar función"):
             try:
@@ -179,8 +253,9 @@ else:
             except Exception as e:
                 st.error(f"❌ Error: {e}")
 
+    # Cerrar sesión
     elif opcion == "Cerrar Sesión":
-        st.session_state.autenticado = False
-        st.session_state.usuario = ""
-        st.session_state.rol = ""
+        for key in ["autenticado", "usuario", "rol", "accion"]:
+            st.session_state[key] = False if key == "autenticado" else ""
         st.rerun()
+
